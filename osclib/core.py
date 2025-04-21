@@ -13,6 +13,8 @@ except ImportError:
 from lxml import etree as ET
 from urllib.error import HTTPError
 
+import json5
+
 from osc.core import ReviewState, create_submit_request
 from osc.core import get_binarylist
 from osc.core import get_commitlog
@@ -130,11 +132,35 @@ def owner_fallback(apiurl, project, package):
 
 
 @memoize(session=True)
-def maintainers_get(apiurl, project, package=None):
-    if package is None:
-        meta = ET.fromstringlist(show_project_meta(apiurl, project))
-        maintainers = meta.xpath('//person[@role="maintainer"]/@userid')
+def git_devel_project_maintainers(org: str, package: str|None, prjgit: str = "_ObsPrj.git", branch: str = "master") -> List[str]:
+    """
+    For projects in Git, maintainership information is stored in the projects _maintainership.json
+    """
+    headers = {'Accept': 'text/plain'}
+    with http_GET(f"https://src.opensuse.org/{org}/{prjgit}/raw/branch/{branch}/_maintainership.json") as f:
+        m = json5.loads(f.read().decode('utf-8'))
+        print(m)
+        project_maintainers = m['']
+        if package is not None and package in m:
+            return set(m[package]) | project_maintainers
+        return project_maintainers
 
+
+@memoize(session=True)
+def maintainers_get(apiurl, project, package=None):
+    meta = ET.fromstringlist(show_project_meta(apiurl, project))
+    scmsync = meta.xpath('//scmsync/text()')
+    if len(scmsync) > 0:
+        logging.debug(f"match project scmsync: {scmsync[0]}")
+        m = re.match('^https://src\\.opensuse\\.org/([^/]+)/([a-zA-Z0-9_\\.-]+[^#]*(#.*)?$)', scmsync[0])
+        if m is not None:
+            org = m[1]
+            prjgit = m[2]
+            branch = m[3]
+            return git_devel_project_maintainers(org, package, prjgit, branch)
+
+    if package is None:
+        maintainers = meta.xpath('//person[@role="maintainer"]/@userid')
         groups = meta.xpath('//group[@role="maintainer"]/@groupid')
         maintainers.extend(groups_members(apiurl, groups))
 
@@ -307,7 +333,6 @@ def factory_git_devel_project_mapping(apiurl: str) -> Dict[str, str]:
             devel_projects[pkg] = prj
     return devel_projects
 
-
 @memoize(session=True)
 def devel_project_get(apiurl: str, target_project: str, target_package: str) -> Union[Tuple[str, str], Tuple[Literal[None], Literal[None]]]:
     """Fetch the devel project & package name of the supplied ``target_project``
@@ -327,6 +352,7 @@ def devel_project_get(apiurl: str, target_project: str, target_package: str) -> 
 
     if target_project.endswith('openSUSE:Factory'):
         devel_pkgs = factory_git_devel_project_mapping(apiurl)
+        logging.debug(f"fetched git devel packages, looking for {target_package}")
         if target_package in devel_pkgs:
             return devel_pkgs[target_package], target_package
     return None, None
